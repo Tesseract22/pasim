@@ -7,6 +7,7 @@ const c = @cImport({
 
 const w_HEIGHT = 1080;
 const w_WIDTH = 1920;
+const w_VIEWPORT = w_HEIGHT;
 const w_RATIO: comptime_float = 
     @as(comptime_float, @floatFromInt(w_WIDTH)) / 
     @as(comptime_float, @floatFromInt(w_HEIGHT));
@@ -28,7 +29,7 @@ const Particle = struct {
     kind: u8,
 };
 
-var particles: [2000]Particle = undefined;
+var particles: [15000]Particle = undefined;
 
 fn splatv2(f: PasimF) @Vector(2, PasimF) {
     return @splat(f);
@@ -38,9 +39,22 @@ fn coord2rlcoord(p: WorldCoord) c.Vector2 {
     return .{ .x = p[0], .y = p[1] };
 }
 
+fn wdist2s(d: PasimF) PasimF {
+    return d/2.0 * w_VIEWPORT;
+}
+
+fn sdist2w(d: PasimF) PasimF {
+    return d/w_VIEWPORT * 2;
+}
+
 fn w2s(p: WorldCoord) ScreenCoord {
-    const v = (p + splatv2(1)) / splatv2(2) * splatv2(w_HEIGHT); // this is from 0-1
+    const v = (p + splatv2(1)) / splatv2(2) * splatv2(w_VIEWPORT); // this is from 0-1
     return .{ v[0]+(w_WIDTH-w_HEIGHT)/2, w_HEIGHT-v[1] };
+}
+
+fn s2w(p: ScreenCoord) WorldCoord {
+    const v = ScreenCoord { p[0]-(w_WIDTH-w_HEIGHT)/2, w_HEIGHT-p[1] };
+    return v / splatv2(w_VIEWPORT) * splatv2(2) - splatv2(1);
 }
 
 fn dist2(a: WorldCoord, b: WorldCoord) PasimF {
@@ -54,7 +68,7 @@ fn dist(a: WorldCoord, b: WorldCoord) PasimF {
 
 var particle_default_texture: c.Texture2D = undefined;
 
-const g_PARTICLE_RADIUS: f32 = 0.005;
+const g_PARTICLE_RADIUS: f32 = 0.0025;
 const g_PARTICLE_TEXTURE_SIZE: f32 = 100;
 const g_PARTICLE_TEXTURE_RADIUS: f32 = g_PARTICLE_RADIUS / (g_PARTICLE_TEXTURE_SIZE / w_WIDTH);
 
@@ -62,8 +76,7 @@ const g_PARTICLE_TEXTURE_RADIUS: f32 = g_PARTICLE_RADIUS / (g_PARTICLE_TEXTURE_S
 // Assume already in shader mode
 fn DrawParticle(p: Particle) void {
     const rgb = particle_colors.items[p.kind];
-    const sreen_coord = w2s(p.pos);
-    // std.log.debug("screen_coord: {}", .{sreen_coord});
+    const sreen_coord = w2s(.{p.pos[0], -p.pos[1]});
     c.DrawTextureEx(
         particle_default_texture,
         .{ .x = sreen_coord[0] - g_PARTICLE_TEXTURE_SIZE/2, .y = sreen_coord[1] - g_PARTICLE_TEXTURE_SIZE/2 },
@@ -76,38 +89,72 @@ const ForceConfig = struct {
     strength: f32, // >0 -> repel, <0 -> attract
 };
 
-// const particle_kind = 3;
-// const force_config_matrix = [particle_kind][particle_kind]ForceConfig {
-//     .{
-//         .{ .radius = 0.07, .strength = 0.01 },
-//         .{ .radius = 0.09, .strength = -0.04 },
-//         .{ .radius = 0.02, .strength = -0.01 },
-//     },
-//     .{
-//         .{ .radius = 0.07, .strength = 0.02 },
-//         .{ .radius = 0.10, .strength = -0.03 },
-//         .{ .radius = 0.10, .strength = -0.04 },
-//     },
-//     .{
-//         .{ .radius = 0.05, .strength = 0.02 },
-//         .{ .radius = 0.05, .strength = -0.03 },
-//         .{ .radius = 0.05, .strength = -0.01 },
-//     }
-//
-// };
-
-var particle_kind: u8 = 0;
+var particle_kind: u32 = 0;
 var particle_force_configs = std.ArrayList(ForceConfig).empty;
 var particle_colors = std.ArrayList(c.Color).empty;
 const collision_cfg = ForceConfig {
     .radius = 0.02,
-    .strength = 7.0,
+    .strength = 1,
 };
-const particle_drag = 5.0;
-const random_force_radius_max = 0.1;
-const random_force_radius_min = 0.05;
-const random_force_strength_max = 0.3;
-const random_force_strength_min = 0.01;
+const particle_drag = 100;
+const r_force_radius_max = 0.09;
+const r_force_radius_min = 0.05;
+const r_force_strength_max = 0.15;
+const r_force_strength_min = 0.02;
+
+const p_GRID_SIZE = 0.1;
+const p_GRID_SPACING = wdist2s(p_GRID_SIZE);
+const p_GRID_H_SLICES: usize = @intFromFloat(@ceil(@as(comptime_float, w_HEIGHT)/p_GRID_SPACING)); 
+const p_GRID_V_SLICES: usize = @intFromFloat(@ceil(@as(comptime_float, w_WIDTH)/p_GRID_SPACING)); 
+const p_GRID_CELL = p_GRID_H_SLICES * p_GRID_V_SLICES;
+var grid_bins: [particles.len]u32 = undefined;
+// the i'th bin contains particles from grid_bins[grid_bins_range[i] : grid_bins_range[i+1]]
+var grid_bins_range: [p_GRID_CELL+1]u32 = undefined;
+
+comptime {
+    const assert = std.debug.assert;
+    assert(p_GRID_SIZE > r_force_radius_max);
+    assert(r_force_radius_min > collision_cfg.radius);
+    assert(r_force_strength_max < collision_cfg.strength);
+}
+
+fn pos_in_bin(wpos: WorldCoord) u32 {
+    const spos = w2s(wpos);
+    const grid_pos: @Vector(2, u32) = @intFromFloat(spos / splatv2(p_GRID_SPACING));
+    const clamped = @Vector(2, u32) { std.math.clamp(grid_pos[0], 0, @as(u32, p_GRID_V_SLICES)-1), std.math.clamp(grid_pos[1], 0, @as(u32, p_GRID_H_SLICES)-1) };
+    const idx = get_grid_index(clamped[0], clamped[1]);
+    return idx;
+} 
+
+fn compute_bin() void {
+    var bin_sizes: [p_GRID_CELL]u32 = undefined;
+    var bin_sizes_prefix: [p_GRID_CELL+1]u32 = undefined;
+
+    @memset(&bin_sizes, 0);
+    for (particles) |p| {
+        const grid_index = pos_in_bin(p.pos);
+        // std.log.debug("p: {}, grid: {}", .{p.pos, grid_index});
+        bin_sizes[grid_index] += 1;
+    }
+
+
+    var sum: u32 = 0;
+    for (bin_sizes, 0..) |size, i| {
+        bin_sizes_prefix[i] = sum;
+        sum += size; 
+    }
+    bin_sizes_prefix[bin_sizes_prefix.len-1] = sum;
+
+    @memcpy(&grid_bins_range, &bin_sizes_prefix);
+
+    for (particles, 0..) |p, i| {
+        const grid_index = pos_in_bin(p.pos);
+        const bin_offset = &bin_sizes_prefix[grid_index];
+        grid_bins[bin_offset.*] = @intCast(i);
+        bin_offset.* += 1;
+    }
+}
+
 
 fn float_range(random: std.Random, min: f32, max: f32) f32 {
     return random.float(f32) * (max - min) + min;
@@ -121,15 +168,15 @@ fn randomize_config(random: std.Random, a: std.mem.Allocator) void {
     particle_force_configs.clearRetainingCapacity();
     particle_colors.clearRetainingCapacity();
     // particle_kind = random.int(u8) % 5 + 2;
-    particle_kind = 3;
+    particle_kind = 5;
     for (0..particle_kind) |i| {
         for (0..particle_kind) |j| {
             _ = i;
             _ = j;
             particle_force_configs.append(a, 
                 .{
-                    .radius = float_range(random, random_force_radius_min, random_force_strength_max),
-                    .strength = random_sign(random) * float_range(random, random_force_strength_min, random_force_strength_max),
+                    .radius = float_range(random, r_force_radius_min, r_force_radius_max),
+                    .strength = random_sign(random) * float_range(random, r_force_strength_min, r_force_strength_max),
                 })
             catch unreachable;
         }
@@ -142,44 +189,111 @@ fn randomize_config(random: std.Random, a: std.mem.Allocator) void {
 fn generate_particle(random: std.Random) void {
     // const init_vel_mul = 0.1;
     const init_vel_mul = 0;
-    for (&particles) |*p| {
+    for (&particles, 0..) |*p, i| {
         p.pos = .{ (random.float(f32)-0.5)*2*w_RATIO, (random.float(f32)-0.5)*2 };
         p.spd = .{ (random.float(f32)-0.5)*init_vel_mul, (random.float(f32)-0.5)*init_vel_mul };
         // p.mass = (random.float(f32) + 0.5) * 2;
         p.mass = 1;
-        p.kind = random.int(u8) % particle_kind;
+        p.kind = @intCast(i % particle_kind);
     }
 }
 
 fn linear_force(cfg: ForceConfig, d: f32) f32 {
-    const f = cfg.strength * @max(0, (cfg.radius-@abs(d)) / cfg.radius);
+    const radius = cfg.radius;
+    const strength = cfg.strength;
+    const f = strength * @max(0, (radius-@abs(d)) / radius);
     return f;
 }
 
+fn compute_interaction(a: *Particle, b: *Particle, dt: PasimF) void {
+    const l = a.pos - b.pos;
+    const d = dist(a.pos, b.pos);
+    const unit_l = if (d == 0) splatv2(0) else l / splatv2(d);
+    // if (d > collision_max_dist) continue;
+    const collision_force = linear_force(collision_cfg, d) * a.mass * b.mass;
+
+    const interact_cfg_ab = particle_force_configs.items[a.kind * particle_kind + b.kind];
+    const interact_cfg_ba = particle_force_configs.items[b.kind * particle_kind + a.kind];
+    const interact_force_ab = linear_force(interact_cfg_ab, d) * a.mass * b.mass;
+    const interact_force_ba = linear_force(interact_cfg_ba, d) * a.mass * b.mass;
+
+    // c.DrawLineEx(coord2rlcoord(w2s(a.pos)), coord2rlcoord(w2s(b.pos)), 1, c.ORANGE);
+
+    a.spd += splatv2(dt*interact_force_ab/a.mass) * unit_l;
+    b.spd -= splatv2(dt*interact_force_ba/b.mass) * unit_l;
+
+    a.spd += splatv2(dt*collision_force/a.mass) * unit_l;
+    b.spd -= splatv2(dt*collision_force/b.mass) * unit_l;
+
+}
+
+fn compute_interaction_in_range(particle: u32, bin_start: u32, bin_end: u32, dt: f32) void {
+    const a = &particles[particle];
+    for (bin_start..bin_end) |j| {
+        const other = grid_bins[j]; 
+        if (particle >= other) continue;
+        const b = &particles[other];
+        compute_interaction(a, b, dt); 
+    }
+}
+
+fn compute_interaction_in_bin(particle: u32, grid_index: u32, dt: f32) void {
+    const bin_start = grid_bins_range[grid_index];
+    const bin_end = grid_bins_range[grid_index+1];
+    compute_interaction_in_range(particle, bin_start, bin_end, dt);
+}
+
+fn get_grid_index(x: u32, y: u32) u32 {
+    return x + y * @as(u32, p_GRID_V_SLICES);
+}
+
+var collision_method_basic = false;
+
 fn update_game(dt: f32) void {
-    for (0..particles.len) |i| {
-        const a = &particles[i];
-        for (i+1..particles.len) |j| {
-            const b = &particles[j];
-            const l = a.pos - b.pos;
-            const d = dist(a.pos, b.pos);
-            const unit_l = if (d == 0) splatv2(0) else l / splatv2(d);
-            // if (d > collision_max_dist) continue;
-            const collision_force = linear_force(collision_cfg, d) * a.mass * b.mass;
+    if (collision_method_basic) {
+        for (0..particles.len) |i| {
+            const a = &particles[i];
+            for (i+1..particles.len) |j| {
+                const b = &particles[j];
+                compute_interaction(a, b, dt); 
+            }
+        }
+    } else {
+        compute_bin();
+        for (0..p_GRID_CELL) |grid_index| {
+            const grid_x: u32 = @intCast(grid_index % p_GRID_V_SLICES);
+            const grid_y: u32 = @intCast(grid_index / p_GRID_V_SLICES);
+            const bin_start = grid_bins_range[grid_index];
+            const bin_end = grid_bins_range[grid_index+1];
+            for (bin_start..bin_end) |i| {
+                const particle: u32 = grid_bins[i];
+                compute_interaction_in_bin(particle, @intCast(grid_index), dt);
+                if (grid_x > 0) compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x-1, grid_y), dt);
+                if (grid_x < p_GRID_V_SLICES-1) compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x+1, grid_y), dt);
+                if (grid_y > 0) compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x, grid_y-1), dt);
+                if (grid_y < p_GRID_H_SLICES-1) compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x, grid_y+1), dt);
 
-            const interact_cfg_ab = particle_force_configs.items[a.kind * particle_kind + b.kind];
-            const interact_cfg_ba = particle_force_configs.items[b.kind * particle_kind + a.kind];
-            const interact_force_ab = linear_force(interact_cfg_ab, d) * a.mass * b.mass;
-            const interact_force_ba = linear_force(interact_cfg_ba, d) * a.mass * b.mass;
-            
-            // c.DrawLineEx(coord2rlcoord(w2s(a.pos)), coord2rlcoord(w2s(b.pos)), 1, c.ORANGE);
-         
-            a.spd += splatv2(dt*interact_force_ab/a.mass) * unit_l;
-            b.spd -= splatv2(dt*interact_force_ba/b.mass) * unit_l;
-
-            a.spd += splatv2(dt*collision_force/a.mass) * unit_l;
-            b.spd -= splatv2(dt*collision_force/b.mass) * unit_l;
-
+                if (grid_x > 0 and
+                    grid_y > 0) 
+                    compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x-1, grid_y-1), dt);
+                if (grid_x > 0 and
+                    grid_y < p_GRID_H_SLICES-1)
+                    compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x-1, grid_y+1), dt);
+                if (grid_x < p_GRID_V_SLICES-1 and
+                    grid_y > 0)
+                    compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x+1, grid_y-1), dt);
+                if (grid_x < p_GRID_V_SLICES-1 and
+                    grid_y < p_GRID_H_SLICES-1)
+                    compute_interaction_in_bin(particle,
+                    get_grid_index(grid_x+1, grid_y+1), dt);
+            }
         }
     }
 
@@ -202,8 +316,7 @@ fn update_game(dt: f32) void {
             a.pos[0] = w_RATIO;
             a.spd[0] = -a.spd[0];
         }
-        a.spd[0] *= @exp(-particle_drag*dt*@abs(a.spd[0]));
-        a.spd[1] *= @exp(-particle_drag*dt*@abs(a.spd[1]));
+        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
         // a.spd -= a.spd * splatv2(particle_drag * dt / a.mass);
     }
 }
@@ -362,7 +475,7 @@ pub fn main() !void {
         .rotation = 0,
         .zoom = 1, 
     };
-    const simulation_frame_rate = 60.0;
+    const simulation_frame_rate = 30.0;
     c.SetTargetFPS(simulation_frame_rate);
     const simulation_dt = 1.0/simulation_frame_rate;
     const a = std.heap.c_allocator;
@@ -401,37 +514,70 @@ pub fn main() !void {
         if (c.IsKeyDown(c.KEY_A)) {
             camera.target.x -= camera_move_spd * dt;
         }
+        if (c.IsKeyPressed(c.KEY_Z)) {
+            collision_method_basic = !collision_method_basic;
+        }
              
         const update_start = std.time.milliTimestamp();
         update_game(simulation_dt);
         const update_end = std.time.milliTimestamp();
         measurement.push(update_end - update_start);
 
+        const mouse_spos = c.GetMousePosition();
+        const mouse_wpos = s2w(.{mouse_spos.x, mouse_spos.y});
+        // const mouse_spos_test = w2s(mouse_wpos);
+        // std.log.debug("mouse: spos: {} {}, wpos: {}", .{ mouse_spos, mouse_spos_test, mouse_wpos });
+
 
         c.BeginTextureMode(HDRBuffer);
         {
             c.ClearBackground(c.BLACK);
-            c.BeginShaderMode(shader);
             c.BeginMode2D(camera);
             c.BeginBlendMode(@intCast(blend_mode));
-
+            c.BeginShaderMode(shader);
             for (particles) |p| {
                 DrawParticle(p);
             }
-            c.EndBlendMode();
-            c.EndMode2D();
             c.EndShaderMode();
+            c.EndBlendMode();
+        
+            if (!collision_method_basic and false) {
+                for (0..p_GRID_H_SLICES+1) |y| {
+                    const yf: f32 = @floatFromInt(y);
+                    c.DrawLineEx(.{.x=0, .y=yf*p_GRID_SPACING }, .{.x=w_WIDTH, .y=yf*p_GRID_SPACING}, 1, c.WHITE);
+                }
+                for (0..p_GRID_V_SLICES+1) |x| {
+                    const xf: f32 = @floatFromInt(x);
+                    c.DrawLineEx(.{.x=xf*p_GRID_SPACING, .y=0}, .{.x=xf*p_GRID_SPACING, .y=w_HEIGHT}, 1, c.WHITE);
+                }
+                const mouse_grid_index = pos_in_bin(mouse_wpos);
+                const grid_x = mouse_grid_index % p_GRID_V_SLICES;
+                const grid_y = mouse_grid_index / p_GRID_V_SLICES;
+                const grid_index = get_grid_index(@intCast(grid_x), @intCast(grid_y));
+                const grid_start = grid_bins_range[grid_index];
+                const grid_end = grid_bins_range[grid_index+1];
+
+                std.log.debug("mouse at pos: {}, grid: {},{} [{}], {} particles", .{ mouse_wpos, grid_x, grid_y, grid_index, grid_end-grid_start });
+                //for (grid_start..grid_end) |i| {
+                //    const pi = grid_bins[i];
+                //    const p = particles[pi];
+                //    std.log.debug("p: {}, {}", .{ pi, p.pos });
+                //}
+            }
+
+            c.EndMode2D();
         }
         c.EndTextureMode();
 
         c.BeginDrawing();
         {
 
+            c.ClearBackground(c.BLACK);
             c.BeginShaderMode(hdr_shader);
             c.DrawTexture(HDRBuffer.texture, 0, 0, c.WHITE);
             c.EndShaderMode();
 
-            const measurement_txt = 
+           const measurement_txt = 
                 std.fmt.allocPrintSentinel(
                     arena.allocator(),
                     "update time: {} ms",

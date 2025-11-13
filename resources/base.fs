@@ -13,7 +13,7 @@ void main() {
     vec2 p = (fragTexCoord - vec2(0.5)) * 2;
     float l = sqrt(p.x*p.x + p.y*p.y);
     float alpha = l < radius ? 1 : 0;
-    float glow = 0.6*exp((-l/radius)*1.0);
+    float glow = 0.4*exp((-l/radius)*1.2);
     // float intensity = smoothstep(0.05, 0, l);
     // glow += intensity;
     // float glow = 2-exp(l);
