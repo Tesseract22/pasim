@@ -16,22 +16,22 @@ const r_VS_PATH = "resources/base.vs";
 const r_FS_PATH = "resources/base.fs";
 const r_HDR_FS_PATH = "resources/hdr.fs";
 
-const PasimF = f32;
 
  // normalized world coordinate
  // (0, 1) is the top of screen
-const WorldCoord =  @Vector(2, PasimF);
-const ScreenCoord =  @Vector(2, PasimF);
+const Vec2 = @Vector(2, f32);
+const WorldCoord =  @Vector(2, f32);
+const ScreenCoord =  @Vector(2, f32);
 const Particle = struct {
     pos: WorldCoord,
-    spd: @Vector(2, PasimF),
+    spd: @Vector(2, f32),
     mass: f32 = 1,
     kind: u8,
 };
 
-var particles: [15000]Particle = undefined;
+var particles: [60000]Particle = undefined;
 
-fn splatv2(f: PasimF) @Vector(2, PasimF) {
+fn splatv2(f: f32) @Vector(2, f32) {
     return @splat(f);
 }
 
@@ -39,11 +39,11 @@ fn coord2rlcoord(p: WorldCoord) c.Vector2 {
     return .{ .x = p[0], .y = p[1] };
 }
 
-fn wdist2s(d: PasimF) PasimF {
+fn wdist2s(d: f32) f32 {
     return d/2.0 * w_VIEWPORT;
 }
 
-fn sdist2w(d: PasimF) PasimF {
+fn sdist2w(d: f32) f32 {
     return d/w_VIEWPORT * 2;
 }
 
@@ -72,12 +72,12 @@ fn size2pixels(s: f32) f32 {
 //     return flip_y(d) + s2w(camera_pos);
 // }
 
-fn dist2(a: WorldCoord, b: WorldCoord) PasimF {
+fn dist2(a: WorldCoord, b: WorldCoord) f32 {
     const d = a - b;
     return @reduce(.Add, d*d);
 }
 
-fn dist(a: WorldCoord, b: WorldCoord) PasimF {
+fn dist(a: WorldCoord, b: WorldCoord) f32 {
     return @sqrt(dist2(a, b));
 }
 
@@ -111,11 +111,11 @@ const collision_cfg = ForceConfig {
     .radius = 0.025,
     .strength = 0.6,
 };
-const particle_drag = 200;
+const particle_drag = 100;
 const r_force_radius_max = 0.099;
 const r_force_radius_min = 0.05;
 const r_force_strength_max = 0.20;
-const r_force_strength_min = 0.05;
+const r_force_strength_min = 0.10;
 
 const mouse_force = ForceConfig {
     .radius = 0.1,
@@ -175,6 +175,8 @@ fn compute_bin() void {
     }
 }
 
+var global_random: std.Random = undefined;
+
 
 fn float_range(random: std.Random, min: f32, max: f32) f32 {
     return random.float(f32) * (max - min) + min;
@@ -184,11 +186,20 @@ fn random_sign(random: std.Random) f32 {
     return if (random.boolean()) 1 else -1;
 }
 
-fn randomize_config(random: std.Random, a: std.mem.Allocator) void {
+fn get_random_unit_sphere(random: std.Random) Vec2 {
+    const angle = 2*std.math.pi * random.float(f32);
+    return .{
+        @sin(angle),
+        @cos(angle),
+    };
+}
+
+fn randomize_config(a: std.mem.Allocator) void {
+    const random = global_random;
     particle_force_configs.clearRetainingCapacity();
     particle_colors.clearRetainingCapacity();
     // particle_kind = random.int(u8) % 5 + 2;
-    particle_kind = 5;
+    particle_kind = 10;
     for (0..particle_kind) |i| {
         for (0..particle_kind) |j| {
             _ = i;
@@ -206,8 +217,9 @@ fn randomize_config(random: std.Random, a: std.mem.Allocator) void {
     }
 }
 
-fn generate_particle(random: std.Random) void {
+fn generate_particle() void {
     // const init_vel_mul = 0.1;
+    const random = global_random;
     const init_vel_mul = 0;
     for (&particles, 0..) |*p, i| {
         p.pos = .{ (random.float(f32)-0.5)*2*w_RATIO, (random.float(f32)-0.5)*2 };
@@ -225,25 +237,30 @@ fn linear_force(cfg: ForceConfig, d: f32) f32 {
     return f;
 }
 
-fn compute_interaction(a: *Particle, b: *Particle, dt: PasimF) void {
+fn compute_interaction(a: *Particle, b: *Particle, dt: f32) void {
     const l = a.pos - b.pos;
-    const d = dist(a.pos, b.pos);
-    const unit_l = if (d == 0) splatv2(0) else l / splatv2(d);
+    const d = dist(a.pos, b.pos); // since we uses linear_force, zero distance does not cause infinite force
+    const unit_l = if (d == 0) .{1,0} else l / splatv2(d);
     // if (d > collision_max_dist) continue;
     const collision_force = linear_force(collision_cfg, d) * a.mass * b.mass;
 
     const interact_cfg_ab = particle_force_configs.items[a.kind * particle_kind + b.kind];
-    const interact_cfg_ba = particle_force_configs.items[b.kind * particle_kind + a.kind];
-    const interact_force_ab = linear_force(interact_cfg_ab, d) * a.mass * b.mass;
-    const interact_force_ba = linear_force(interact_cfg_ba, d) * a.mass * b.mass;
-
+    //const interact_cfg_ba = particle_force_configs.items[b.kind * particle_kind + a.kind];
+    const interact_force_ab = linear_force(interact_cfg_ab, d);
+    //const interact_force_ba = linear_force(interact_cfg_ba, d);
     // c.DrawLineEx(coord2rlcoord(w2s(a.pos)), coord2rlcoord(w2s(b.pos)), 1, c.ORANGE);
 
-    a.spd += splatv2(dt*interact_force_ab/a.mass) * unit_l;
-    b.spd -= splatv2(dt*interact_force_ba/b.mass) * unit_l;
+    a.spd += splatv2(dt*interact_force_ab) * unit_l;
+    // b.spd -= splatv2(dt*interact_force_ba) * unit_l;
 
-    a.spd += splatv2(dt*collision_force/a.mass) * unit_l;
-    b.spd -= splatv2(dt*collision_force/b.mass) * unit_l;
+    a.spd += splatv2(dt*collision_force) * unit_l;
+    //b.spd -= splatv2(dt*collision_force/2) * unit_l;
+
+    if (d == 0) {
+        const random_unit = get_random_unit_sphere(global_random);
+        a.pos += random_unit * splatv2(1e-3);
+        b.pos -= random_unit * splatv2(1e-3);
+    }
 
 }
 
@@ -251,16 +268,61 @@ fn compute_interaction_in_range(particle: u32, bin_start: u32, bin_end: u32, dt:
     const a = &particles[particle];
     for (bin_start..bin_end) |j| {
         const other = grid_bins[j]; 
-        if (particle >= other) continue;
+        if (other == particle) continue;
         const b = &particles[other];
         compute_interaction(a, b, dt); 
     }
 }
 
-fn compute_interaction_in_bin(particle: u32, grid_index: u32, dt: f32) void {
+fn compute_interaction_with_bin(particle: u32, grid_index: u32, dt: f32) void {
     const bin_start = grid_bins_range[grid_index];
     const bin_end = grid_bins_range[grid_index+1];
     compute_interaction_in_range(particle, bin_start, bin_end, dt);
+}
+
+
+fn compute_interaction_in_bin(grid_index: u32, dt: f32) void {
+    const grid_x: u32 = @intCast(grid_index % p_GRID_V_SLICES);
+    const grid_y: u32 = @intCast(grid_index / p_GRID_V_SLICES);
+    const bin_start = grid_bins_range[grid_index];
+    const bin_end = grid_bins_range[grid_index+1];
+    for (bin_start..bin_end) |i| {
+        const particle: u32 = grid_bins[i];
+        compute_interaction_with_bin(particle, @intCast(grid_index), dt);
+        if (grid_x > 0) compute_interaction_with_bin(particle,
+            get_grid_index(grid_x-1, grid_y), dt);
+        if (grid_x < p_GRID_V_SLICES-1) compute_interaction_with_bin(particle,
+            get_grid_index(grid_x+1, grid_y), dt);
+        if (grid_y > 0) compute_interaction_with_bin(particle,
+            get_grid_index(grid_x, grid_y-1), dt);
+        if (grid_y < p_GRID_H_SLICES-1) compute_interaction_with_bin(particle,
+            get_grid_index(grid_x, grid_y+1), dt);
+
+        if (grid_x > 0 and
+            grid_y > 0) 
+            compute_interaction_with_bin(particle,
+                get_grid_index(grid_x-1, grid_y-1), dt);
+        if (grid_x > 0 and
+            grid_y < p_GRID_H_SLICES-1)
+            compute_interaction_with_bin(particle,
+                get_grid_index(grid_x-1, grid_y+1), dt);
+        if (grid_x < p_GRID_V_SLICES-1 and
+            grid_y > 0)
+            compute_interaction_with_bin(particle,
+                get_grid_index(grid_x+1, grid_y-1), dt);
+        if (grid_x < p_GRID_V_SLICES-1 and
+            grid_y < p_GRID_H_SLICES-1)
+            compute_interaction_with_bin(particle,
+                get_grid_index(grid_x+1, grid_y+1), dt);
+    }
+}
+
+fn compute_interaction_in_bin_parallel(grid_index_a: *std.atomic.Value(u32), dt: f32) void {
+    while (true) {
+        const grid_index = grid_index_a.fetchAdd(1, .monotonic);
+        if (grid_index >= p_GRID_CELL) break;
+        compute_interaction_in_bin(grid_index, dt);
+    }
 }
 
 fn get_grid_index(x: u32, y: u32) u32 {
@@ -268,6 +330,7 @@ fn get_grid_index(x: u32, y: u32) u32 {
 }
 
 var collision_method_basic = false;
+
 
 fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, repel }) void {
     if (collision_method_basic) {
@@ -280,41 +343,17 @@ fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, re
         }
     } else {
         compute_bin();
-        for (0..p_GRID_CELL) |grid_index| {
-            const grid_x: u32 = @intCast(grid_index % p_GRID_V_SLICES);
-            const grid_y: u32 = @intCast(grid_index / p_GRID_V_SLICES);
-            const bin_start = grid_bins_range[grid_index];
-            const bin_end = grid_bins_range[grid_index+1];
-            for (bin_start..bin_end) |i| {
-                const particle: u32 = grid_bins[i];
-                compute_interaction_in_bin(particle, @intCast(grid_index), dt);
-                if (grid_x > 0) compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x-1, grid_y), dt);
-                if (grid_x < p_GRID_V_SLICES-1) compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x+1, grid_y), dt);
-                if (grid_y > 0) compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x, grid_y-1), dt);
-                if (grid_y < p_GRID_H_SLICES-1) compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x, grid_y+1), dt);
-
-                if (grid_x > 0 and
-                    grid_y > 0) 
-                    compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x-1, grid_y-1), dt);
-                if (grid_x > 0 and
-                    grid_y < p_GRID_H_SLICES-1)
-                    compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x-1, grid_y+1), dt);
-                if (grid_x < p_GRID_V_SLICES-1 and
-                    grid_y > 0)
-                    compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x+1, grid_y-1), dt);
-                if (grid_x < p_GRID_V_SLICES-1 and
-                    grid_y < p_GRID_H_SLICES-1)
-                    compute_interaction_in_bin(particle,
-                    get_grid_index(grid_x+1, grid_y+1), dt);
-            }
+        var threads: [10]std.Thread = undefined;
+        var grid_index = std.atomic.Value(u32).init(0);
+        for (&threads) |*t| {
+            t.* = std.Thread.spawn(.{}, compute_interaction_in_bin_parallel, .{ &grid_index, dt }) catch unreachable;
         }
+        for (&threads) |*t| {
+            t.join();
+        }
+        // for (0..p_GRID_CELL) |grid_index| {
+        //     compute_interaction_in_bin(@intCast(grid_index), dt);
+        // }
     }
 
     for (0..particles.len) |i| {
@@ -479,7 +518,7 @@ pub fn main() !void {
     };
 
     var rand = std.Random.Xoroshiro128.init(@bitCast(std.time.microTimestamp()));
-    const random = rand.random();
+    global_random = rand.random();
 
 
 
@@ -505,8 +544,8 @@ pub fn main() !void {
 
 
     // const p = Particle { .pos = .{0, 0} };
-    randomize_config(random, std.heap.c_allocator);
-    generate_particle(random);
+    randomize_config(std.heap.c_allocator);
+    generate_particle();
     var camera = c.Camera2D {
         .zoom = 1, 
     };
@@ -526,8 +565,8 @@ pub fn main() !void {
         const dt = c.GetFrameTime();
         _ = arena.reset(.retain_capacity);
         if (c.IsKeyPressed(c.KEY_R)) {
-            randomize_config(random, std.heap.c_allocator);
-            generate_particle(random);
+            randomize_config(std.heap.c_allocator);
+            generate_particle();
         }
         if (c.IsKeyPressed(c.KEY_SPACE)) {
             const timestamp = std.time.microTimestamp();
@@ -544,7 +583,7 @@ pub fn main() !void {
 
         // 
         const camera_move_spd = 500;
-        const camera_zoom_spd = 0.2;
+        const camera_zoom_spd = 0.3;
         const wheel = c.GetMouseWheelMove();
         if (wheel != 0)
         {
@@ -555,7 +594,7 @@ pub fn main() !void {
 
             // Zoom increment
             // Uses log scaling to provide consistent zoom speed
-            camera_target.zoom = std.math.clamp(@exp(@log(camera.zoom)+wheel*camera_zoom_spd), 0.125, 64.0);
+            camera_target.zoom = std.math.clamp(@exp2(@log2(camera.zoom)+wheel*camera_zoom_spd), 0.125, 64.0);
         }
         if (c.IsKeyDown(c.KEY_W)) {
             camera_target.target.y += camera_move_spd * dt;
