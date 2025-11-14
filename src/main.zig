@@ -53,9 +53,20 @@ fn w2s(p: WorldCoord) ScreenCoord {
 }
 
 fn s2w(p: ScreenCoord) WorldCoord {
-    const v = ScreenCoord { p[0]-(w_WIDTH-w_HEIGHT)/2, w_HEIGHT-p[1] };
+    const v = ScreenCoord { p[0]-(w_WIDTH-w_HEIGHT)/2, p[1] };
     return v / splatv2(w_VIEWPORT) * splatv2(2) - splatv2(1);
 }
+
+fn flip_y(p: @Vector(2, f32)) @Vector(2, f32) {
+    return .{ p[0], -p[1] };
+}
+
+// fn s2w_camera(p: ScreenCoord, camera: c.Camera2D) WorldCoord {
+//     const camera_pos = ScreenCoord { camera.target.x, camera.target.y };
+//     const center = ScreenCoord { w_WIDTH/2, w_HEIGHT/2 };
+//     const d = (p - center) / splatv2(w_VIEWPORT/(2*camera.zoom));
+//     return flip_y(d) + s2w(camera_pos);
+// }
 
 fn dist2(a: WorldCoord, b: WorldCoord) PasimF {
     const d = a - b;
@@ -93,14 +104,19 @@ var particle_kind: u32 = 0;
 var particle_force_configs = std.ArrayList(ForceConfig).empty;
 var particle_colors = std.ArrayList(c.Color).empty;
 const collision_cfg = ForceConfig {
-    .radius = 0.02,
-    .strength = 1,
+    .radius = 0.025,
+    .strength = 0.6,
 };
-const particle_drag = 100;
-const r_force_radius_max = 0.09;
+const particle_drag = 200;
+const r_force_radius_max = 0.099;
 const r_force_radius_min = 0.05;
-const r_force_strength_max = 0.15;
-const r_force_strength_min = 0.02;
+const r_force_strength_max = 0.20;
+const r_force_strength_min = 0.05;
+
+const mouse_force = ForceConfig {
+    .radius = 0.5,
+    .strength = 5,
+};
 
 const p_GRID_SIZE = 0.1;
 const p_GRID_SPACING = wdist2s(p_GRID_SIZE);
@@ -249,7 +265,7 @@ fn get_grid_index(x: u32, y: u32) u32 {
 
 var collision_method_basic = false;
 
-fn update_game(dt: f32) void {
+fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, repel }) void {
     if (collision_method_basic) {
         for (0..particles.len) |i| {
             const a = &particles[i];
@@ -299,6 +315,19 @@ fn update_game(dt: f32) void {
 
     for (0..particles.len) |i| {
         const a = &particles[i];
+        const d = dist(a.pos, mouse_pos);
+        const l = a.pos - mouse_pos;
+        const unit_l = if (d == 0) splatv2(0) else l / splatv2(d);
+        if (mouse_action) |action| {
+            const f = linear_force(mouse_force, d);
+            switch (action) {
+                .attract =>
+                    a.spd += splatv2(dt*f/a.mass) * unit_l,
+                .repel =>
+                    a.spd -= splatv2(dt*f/a.mass) * unit_l,
+            } 
+        }
+        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
         a.pos += a.spd * splatv2(dt);
         if (a.pos[1] < -1) {
             a.pos[1] = -1;
@@ -316,7 +345,6 @@ fn update_game(dt: f32) void {
             a.pos[0] = w_RATIO;
             a.spd[0] = -a.spd[0];
         }
-        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
         // a.spd -= a.spd * splatv2(particle_drag * dt / a.mass);
     }
 }
@@ -470,9 +498,6 @@ pub fn main() !void {
     randomize_config(random, std.heap.c_allocator);
     generate_particle(random);
     var camera = c.Camera2D {
-        .offset = .{ .x = w_WIDTH/2, .y = w_HEIGHT/2 },
-        .target = .{ .x = w_WIDTH/2, .y = w_HEIGHT/2 },
-        .rotation = 0,
         .zoom = 1, 
     };
     const simulation_frame_rate = 30.0;
@@ -498,10 +523,29 @@ pub fn main() !void {
             c.TakeScreenshot(screenshot_name);
         }
 
+        // const y_shift = camera.target.y - w_HEIGHT/2;
+        const mouse_abs_pos = c.Vector2 { .x = c.GetMousePosition().x, .y = w_HEIGHT-c.GetMousePosition().y };
+        const mouse_spos = c.GetScreenToWorld2D(mouse_abs_pos, camera);
+        const mouse_wpos = s2w(.{ mouse_spos.x, mouse_spos.y });
+        const mouse_grid_index = pos_in_bin(mouse_wpos);
+
+
         const camera_move_spd = 500;
-        const camera_zoom_spd = 5;
-        camera.zoom += c.GetMouseWheelMove() * camera_zoom_spd * dt;
-        camera.zoom = @max(1, camera.zoom);
+        const camera_zoom_spd = 0.2;
+        const wheel = c.GetMouseWheelMove();
+        if (wheel != 0)
+        {
+            // Set the offset to where the mouse is
+            camera.offset = mouse_abs_pos;
+
+            // Set the target to match, so that the camera maps the world space point
+            // under the cursor to the screen space point under the cursor at any zoom
+            camera.target = mouse_spos;
+
+            // Zoom increment
+            // Uses log scaling to provide consistent zoom speed
+            camera.zoom = std.math.clamp(@exp(@log(camera.zoom)+wheel*camera_zoom_spd), 0.125, 64.0);
+        }
         if (c.IsKeyDown(c.KEY_W)) {
             camera.target.y += camera_move_spd * dt;
         }
@@ -517,22 +561,25 @@ pub fn main() !void {
         if (c.IsKeyPressed(c.KEY_Z)) {
             collision_method_basic = !collision_method_basic;
         }
-             
+
+        
+
         const update_start = std.time.milliTimestamp();
-        update_game(simulation_dt);
+        update_game(simulation_dt, mouse_wpos, if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null);
         const update_end = std.time.milliTimestamp();
         measurement.push(update_end - update_start);
 
-        const mouse_spos = c.GetMousePosition();
-        const mouse_wpos = s2w(.{mouse_spos.x, mouse_spos.y});
-        // const mouse_spos_test = w2s(mouse_wpos);
-        // std.log.debug("mouse: spos: {} {}, wpos: {}", .{ mouse_spos, mouse_spos_test, mouse_wpos });
-
+        const mouse_spos_test = w2s(.{ mouse_wpos[0], -mouse_wpos[1] }) ;
+        // std.log.err("zoom: {}, mouse: spos: {} wpos: {}", .{ camera.zoom, mouse_spos, mouse_wpos});
+        
 
         c.BeginTextureMode(HDRBuffer);
         {
             c.ClearBackground(c.BLACK);
             c.BeginMode2D(camera);
+
+            c.DrawCircle(@intFromFloat(mouse_spos_test[0]), @intFromFloat(mouse_spos_test[1]), 20, c.WHITE);
+
             c.BeginBlendMode(@intCast(blend_mode));
             c.BeginShaderMode(shader);
             for (particles) |p| {
@@ -550,7 +597,6 @@ pub fn main() !void {
                     const xf: f32 = @floatFromInt(x);
                     c.DrawLineEx(.{.x=xf*p_GRID_SPACING, .y=0}, .{.x=xf*p_GRID_SPACING, .y=w_HEIGHT}, 1, c.WHITE);
                 }
-                const mouse_grid_index = pos_in_bin(mouse_wpos);
                 const grid_x = mouse_grid_index % p_GRID_V_SLICES;
                 const grid_y = mouse_grid_index / p_GRID_V_SLICES;
                 const grid_index = get_grid_index(@intCast(grid_x), @intCast(grid_y));
