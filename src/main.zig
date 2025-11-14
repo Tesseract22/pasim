@@ -61,6 +61,10 @@ fn flip_y(p: @Vector(2, f32)) @Vector(2, f32) {
     return .{ p[0], -p[1] };
 }
 
+fn size2pixels(s: f32) f32 {
+    return s / 2.0 * w_VIEWPORT;
+}
+
 // fn s2w_camera(p: ScreenCoord, camera: c.Camera2D) WorldCoord {
 //     const camera_pos = ScreenCoord { camera.target.x, camera.target.y };
 //     const center = ScreenCoord { w_WIDTH/2, w_HEIGHT/2 };
@@ -114,7 +118,7 @@ const r_force_strength_max = 0.20;
 const r_force_strength_min = 0.05;
 
 const mouse_force = ForceConfig {
-    .radius = 0.5,
+    .radius = 0.1,
     .strength = 5,
 };
 
@@ -315,6 +319,8 @@ fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, re
 
     for (0..particles.len) |i| {
         const a = &particles[i];
+        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
+        // mouse force
         const d = dist(a.pos, mouse_pos);
         const l = a.pos - mouse_pos;
         const unit_l = if (d == 0) splatv2(0) else l / splatv2(d);
@@ -327,7 +333,7 @@ fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, re
                     a.spd -= splatv2(dt*f/a.mass) * unit_l,
             } 
         }
-        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
+
         a.pos += a.spd * splatv2(dt);
         if (a.pos[1] < -1) {
             a.pos[1] = -1;
@@ -457,6 +463,10 @@ fn LoadRenderTextureHDR(width: c_int, height: c_int) c.RenderTexture2D
     return target;
 }
 
+fn exp_smooth(current: f32, target: f32, delta: f32) f32 {
+    return current + (target - current) * (1 - @exp(-delta));
+}
+
 pub fn main() !void {
     std.log.debug("opengl version: {s}", .{ c.RLGL_VERSION });
     c.InitWindow(w_WIDTH, w_HEIGHT, "Pasim"); 
@@ -500,6 +510,9 @@ pub fn main() !void {
     var camera = c.Camera2D {
         .zoom = 1, 
     };
+    var camera_target = c.Camera2D {
+        .zoom = 1,
+    };
     const simulation_frame_rate = 30.0;
     c.SetTargetFPS(simulation_frame_rate);
     const simulation_dt = 1.0/simulation_frame_rate;
@@ -529,38 +542,42 @@ pub fn main() !void {
         const mouse_wpos = s2w(.{ mouse_spos.x, mouse_spos.y });
         const mouse_grid_index = pos_in_bin(mouse_wpos);
 
-
+        // 
         const camera_move_spd = 500;
         const camera_zoom_spd = 0.2;
         const wheel = c.GetMouseWheelMove();
         if (wheel != 0)
         {
-            // Set the offset to where the mouse is
+            camera_target.offset = mouse_abs_pos;
             camera.offset = mouse_abs_pos;
-
-            // Set the target to match, so that the camera maps the world space point
-            // under the cursor to the screen space point under the cursor at any zoom
+            camera_target.target = mouse_spos;
             camera.target = mouse_spos;
 
             // Zoom increment
             // Uses log scaling to provide consistent zoom speed
-            camera.zoom = std.math.clamp(@exp(@log(camera.zoom)+wheel*camera_zoom_spd), 0.125, 64.0);
+            camera_target.zoom = std.math.clamp(@exp(@log(camera.zoom)+wheel*camera_zoom_spd), 0.125, 64.0);
         }
         if (c.IsKeyDown(c.KEY_W)) {
-            camera.target.y += camera_move_spd * dt;
+            camera_target.target.y += camera_move_spd * dt;
         }
         if (c.IsKeyDown(c.KEY_S)) {
-            camera.target.y -= camera_move_spd * dt;
+            camera_target.target.y -= camera_move_spd * dt;
         }
         if (c.IsKeyDown(c.KEY_D)) {
-            camera.target.x += camera_move_spd * dt;
+            camera_target.target.x += camera_move_spd * dt;
         }
         if (c.IsKeyDown(c.KEY_A)) {
-            camera.target.x -= camera_move_spd * dt;
+            camera_target.target.x -= camera_move_spd * dt;
         }
         if (c.IsKeyPressed(c.KEY_Z)) {
             collision_method_basic = !collision_method_basic;
         }
+        const camera_smooth_spd = 10;
+        camera.zoom = exp_smooth(camera.zoom, camera_target.zoom, dt * camera_smooth_spd);
+        camera.target.x = exp_smooth(camera.target.x, camera_target.target.x, dt * camera_smooth_spd);
+        camera.target.y = exp_smooth(camera.target.y, camera_target.target.y, dt * camera_smooth_spd);
+        camera.offset.x = exp_smooth(camera.offset.x, camera_target.offset.x, dt * camera_smooth_spd);
+        camera.offset.y = exp_smooth(camera.offset.y, camera_target.offset.y, dt * camera_smooth_spd);
 
         
 
@@ -578,7 +595,8 @@ pub fn main() !void {
             c.ClearBackground(c.BLACK);
             c.BeginMode2D(camera);
 
-            c.DrawCircle(@intFromFloat(mouse_spos_test[0]), @intFromFloat(mouse_spos_test[1]), 20, c.WHITE);
+            c.DrawCircle(@intFromFloat(mouse_spos_test[0]), @intFromFloat(mouse_spos_test[1]), size2pixels(mouse_force.radius),
+                .{.r = 0xff, .g = 0xff, .b = 0xff, .a = 0x3f });
 
             c.BeginBlendMode(@intCast(blend_mode));
             c.BeginShaderMode(shader);
