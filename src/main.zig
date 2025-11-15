@@ -12,9 +12,9 @@ const w_RATIO: comptime_float =
     @as(comptime_float, @floatFromInt(w_WIDTH)) / 
     @as(comptime_float, @floatFromInt(w_HEIGHT));
 
-const r_VS_PATH = "resources/base.vs";
-const r_FS_PATH = "resources/base.fs";
-const r_HDR_FS_PATH = "resources/hdr.fs";
+const r_VS_SRC = @embedFile("resources/base.vs");
+const r_FS_SRC = @embedFile("resources/base.fs");
+const r_HDR_FS_SRC = @embedFile("resources/hdr.fs");
 
 
  // normalized world coordinate
@@ -29,7 +29,7 @@ const Particle = struct {
     kind: u8,
 };
 
-var particles: [60000]Particle = undefined;
+var particles: [30000]Particle = undefined;
 
 fn splatv2(f: f32) @Vector(2, f32) {
     return @splat(f);
@@ -111,11 +111,11 @@ const collision_cfg = ForceConfig {
     .radius = 0.025,
     .strength = 0.6,
 };
-const particle_drag = 100;
+const particle_drag = 20;
 const r_force_radius_max = 0.099;
 const r_force_radius_min = 0.05;
 const r_force_strength_max = 0.20;
-const r_force_strength_min = 0.10;
+const r_force_strength_min = 0.05;
 
 const mouse_force = ForceConfig {
     .radius = 0.1,
@@ -343,7 +343,7 @@ fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, re
         }
     } else {
         compute_bin();
-        var threads: [10]std.Thread = undefined;
+        var threads: [16]std.Thread = undefined;
         var grid_index = std.atomic.Value(u32).init(0);
         for (&threads) |*t| {
             t.* = std.Thread.spawn(.{}, compute_interaction_in_bin_parallel, .{ &grid_index, dt }) catch unreachable;
@@ -522,11 +522,11 @@ pub fn main() !void {
 
 
 
-    const shader = c.LoadShader(null, r_FS_PATH);
+    const shader = c.LoadShaderFromMemory(null, r_FS_SRC);
     const shader_radius_uniform = c.GetShaderLocation(shader, "radius");
     c.SetShaderValue(shader, shader_radius_uniform, @ptrCast(&g_PARTICLE_TEXTURE_RADIUS), c.SHADER_UNIFORM_FLOAT);
     const HDRBuffer = LoadRenderTextureHDR(w_WIDTH, w_HEIGHT);
-    const hdr_shader = c.LoadShader(null, r_HDR_FS_PATH);
+    const hdr_shader = c.LoadShaderFromMemory(null, r_HDR_FS_SRC);
     // const hdr_tex_id = c.rlLoadTexture(null, w_WIDTH, w_HEIGHT, c.RL_PIXELFORMAT_UNCOMPRESSED_R16G16B16A16, 1);
     // const hdr_tex = c.Texture2D {
     //     .id = hdr_tex_id,
@@ -552,8 +552,8 @@ pub fn main() !void {
     var camera_target = c.Camera2D {
         .zoom = 1,
     };
-    const simulation_frame_rate = 30.0;
-    c.SetTargetFPS(simulation_frame_rate);
+    const simulation_frame_rate = 120.0;
+    c.SetTargetFPS(30);
     const simulation_dt = 1.0/simulation_frame_rate;
     const a = std.heap.c_allocator;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -621,7 +621,9 @@ pub fn main() !void {
         
 
         const update_start = std.time.milliTimestamp();
-        update_game(simulation_dt, mouse_wpos, if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null);
+        update_game(simulation_dt/2.0, mouse_wpos, if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null);
+        update_game(simulation_dt/2.0, mouse_wpos, if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null);
+
         const update_end = std.time.milliTimestamp();
         measurement.push(update_end - update_start);
 
