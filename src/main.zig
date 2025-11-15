@@ -317,6 +317,33 @@ fn compute_interaction_in_bin(grid_index: u32, dt: f32) void {
     }
 }
 
+const Barrier = struct {
+    event: std.Thread.ResetEvent = .{},
+    counter: std.atomic.Value(usize),
+
+    pub fn init(num_threads: usize) Barrier {
+        return .{
+            .counter = std.atomic.Value(usize).init(num_threads),
+        };
+    }
+
+    pub fn wait(self: *Barrier) void {
+        if (self.counter.fetchSub(1, .acq_rel) == 1) {
+            self.event.set();
+        }
+    }
+};
+
+fn compute_worker(grid_index_a: *std.atomic.Value(u32), dt: f32, start_barrier: *Barrier, end_barrier: *Barrier) void {
+    while (true) {
+        start_barrier.wait();
+        compute_interaction_in_bin_parallel(grid_index_a, dt);
+        end_barrier.wait();
+    }
+}
+
+var compute_worker_threads: [16]std.Thread = undefined;
+
 fn compute_interaction_in_bin_parallel(grid_index_a: *std.atomic.Value(u32), dt: f32) void {
     while (true) {
         const grid_index = grid_index_a.fetchAdd(1, .monotonic);
@@ -332,7 +359,18 @@ fn get_grid_index(x: u32, y: u32) u32 {
 var collision_method_basic = false;
 
 
-fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, repel }) void {
+const MouseAction = enum {
+    attract,
+    repel,
+};
+
+fn update_game(dt: f32,
+    mouse_pos: WorldCoord,
+    mouse_action: ?MouseAction,
+    grid_index: *std.atomic.Value(u32),
+    grid_compute_threads: []std.Thread,
+    grid_compute_start_barrier: *Barrier,
+    grid_compute_end_barrier: *Barrier,) void {
     if (collision_method_basic) {
         for (0..particles.len) |i| {
             const a = &particles[i];
@@ -343,17 +381,13 @@ fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, re
         }
     } else {
         compute_bin();
-        var threads: [16]std.Thread = undefined;
-        var grid_index = std.atomic.Value(u32).init(0);
-        for (&threads) |*t| {
-            t.* = std.Thread.spawn(.{}, compute_interaction_in_bin_parallel, .{ &grid_index, dt }) catch unreachable;
-        }
-        for (&threads) |*t| {
-            t.join();
-        }
-        // for (0..p_GRID_CELL) |grid_index| {
-        //     compute_interaction_in_bin(@intCast(grid_index), dt);
-        // }
+        grid_index.store(0, .release);
+        grid_compute_start_barrier.wait();
+        compute_interaction_in_bin_parallel(grid_index, dt);
+        grid_compute_start_barrier.* = .init(grid_compute_threads.len + 1);
+        grid_compute_end_barrier.wait();
+
+        grid_compute_end_barrier.* = .init(grid_compute_threads.len + 1);
     }
 
     for (0..particles.len) |i| {
@@ -364,6 +398,7 @@ fn update_game(dt: f32, mouse_pos: WorldCoord, mouse_action: ?enum { attract, re
         const l = a.pos - mouse_pos;
         const unit_l = if (d == 0) splatv2(0) else l / splatv2(d);
         if (mouse_action) |action| {
+            @branchHint(.unlikely);
             const f = linear_force(mouse_force, d);
             switch (action) {
                 .attract =>
@@ -553,12 +588,20 @@ pub fn main() !void {
         .zoom = 1,
     };
     const simulation_frame_rate = 120.0;
-    c.SetTargetFPS(30);
+    c.SetTargetFPS(60);
     const simulation_dt = 1.0/simulation_frame_rate;
     const a = std.heap.c_allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     const blend_mode: c.BlendMode = c.BLEND_ADDITIVE;
     var measurement = FixedRingBuffer(i64, 5).init_with_value(5, 0);
+
+    var grid_threads: [10]std.Thread = undefined;
+    var grid_index_a = std.atomic.Value(u32).init(0);
+    var start_barrier = Barrier.init(grid_threads.len+1);
+    var end_barrier = Barrier.init(grid_threads.len+1);
+    for (&grid_threads) |*t| {
+        t.* = std.Thread.spawn(.{}, compute_worker, .{&grid_index_a, simulation_dt/2.0, &start_barrier, &end_barrier }) catch unreachable;
+    }
 
     
     while (!c.WindowShouldClose()) {
@@ -618,11 +661,11 @@ pub fn main() !void {
         camera.offset.x = exp_smooth(camera.offset.x, camera_target.offset.x, dt * camera_smooth_spd);
         camera.offset.y = exp_smooth(camera.offset.y, camera_target.offset.y, dt * camera_smooth_spd);
 
-        
+        const mouse_action: ?MouseAction =  if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null;
 
         const update_start = std.time.milliTimestamp();
-        update_game(simulation_dt/2.0, mouse_wpos, if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null);
-        update_game(simulation_dt/2.0, mouse_wpos, if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null);
+        update_game(simulation_dt/2.0, mouse_wpos, mouse_action, &grid_index_a, &grid_threads, &start_barrier, &end_barrier);
+        update_game(simulation_dt/2.0, mouse_wpos, mouse_action, &grid_index_a, &grid_threads, &start_barrier, &end_barrier);
 
         const update_end = std.time.milliTimestamp();
         measurement.push(update_end - update_start);
