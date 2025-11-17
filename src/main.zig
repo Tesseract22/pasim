@@ -1,8 +1,10 @@
 const std = @import("std");
+const Perf = @import("perf.zig");
 
 const c = @cImport({
     @cInclude("raylib.h");
     @cInclude("rlgl.h");
+    @cInclude("raygui.h");
 });
 
 const w_HEIGHT = 1080;
@@ -29,7 +31,8 @@ const Particle = struct {
     kind: u8,
 };
 
-var particles: [30000]Particle = undefined;
+var particles_buf: [Cfg.particle_count_max]Particle = undefined;
+var particles = std.ArrayList(Particle).initBuffer(&particles_buf);
 
 fn splatv2(f: f32) @Vector(2, f32) {
     return @splat(f);
@@ -65,13 +68,6 @@ fn size2pixels(s: f32) f32 {
     return s / 2.0 * w_VIEWPORT;
 }
 
-// fn s2w_camera(p: ScreenCoord, camera: c.Camera2D) WorldCoord {
-//     const camera_pos = ScreenCoord { camera.target.x, camera.target.y };
-//     const center = ScreenCoord { w_WIDTH/2, w_HEIGHT/2 };
-//     const d = (p - center) / splatv2(w_VIEWPORT/(2*camera.zoom));
-//     return flip_y(d) + s2w(camera_pos);
-// }
-
 fn dist2(a: WorldCoord, b: WorldCoord) f32 {
     const d = a - b;
     return @reduce(.Add, d*d);
@@ -89,7 +85,7 @@ const g_PARTICLE_TEXTURE_RADIUS: f32 = g_PARTICLE_RADIUS / (g_PARTICLE_TEXTURE_S
 
 
 // Assume already in shader mode
-fn DrawParticle(p: Particle) void {
+fn draw_particle(p: Particle) void {
     const rgb = particle_colors.items[p.kind];
     const sreen_coord = w2s(.{p.pos[0], -p.pos[1]});
     c.DrawTextureEx(
@@ -107,15 +103,15 @@ const ForceConfig = struct {
 var particle_kind: u32 = 0;
 var particle_force_configs = std.ArrayList(ForceConfig).empty;
 var particle_colors = std.ArrayList(c.Color).empty;
-const collision_cfg = ForceConfig {
+var collision_cfg = ForceConfig {
     .radius = 0.025,
     .strength = 0.6,
 };
 const particle_drag = 20;
-const r_force_radius_max = 0.099;
-const r_force_radius_min = 0.05;
-const r_force_strength_max = 0.20;
-const r_force_strength_min = 0.05;
+var r_force_radius_max: f32 = 0.099;
+var r_force_radius_min: f32 = 0.05;
+var r_force_strength_max: f32 = 0.20;
+var r_force_strength_min: f32 = 0.05;
 
 const mouse_force = ForceConfig {
     .radius = 0.1,
@@ -127,15 +123,17 @@ const p_GRID_SPACING = wdist2s(p_GRID_SIZE);
 const p_GRID_H_SLICES: usize = @intFromFloat(@ceil(@as(comptime_float, w_HEIGHT)/p_GRID_SPACING)); 
 const p_GRID_V_SLICES: usize = @intFromFloat(@ceil(@as(comptime_float, w_WIDTH)/p_GRID_SPACING)); 
 const p_GRID_CELL = p_GRID_H_SLICES * p_GRID_V_SLICES;
-var grid_bins: [particles.len]u32 = undefined;
+var grid_bins_buf: [Cfg.particle_count_max]u32 = undefined;
+var grid_bins = std.ArrayList(u32).initBuffer(&grid_bins_buf);
 // the i'th bin contains particles from grid_bins[grid_bins_range[i] : grid_bins_range[i+1]]
 var grid_bins_range: [p_GRID_CELL+1]u32 = undefined;
 
 comptime {
     const assert = std.debug.assert;
-    assert(p_GRID_SIZE > r_force_radius_max);
-    assert(r_force_radius_min > collision_cfg.radius);
-    assert(r_force_strength_max < collision_cfg.strength);
+    _ = assert;
+    // assert(p_GRID_SIZE > r_force_radius_max);
+    // assert(r_force_radius_min > collision_cfg.radius);
+    // assert(r_force_strength_max < collision_cfg.strength);
 }
 
 fn pos_in_bin(wpos: WorldCoord) u32 {
@@ -151,7 +149,7 @@ fn compute_bin() void {
     var bin_sizes_prefix: [p_GRID_CELL+1]u32 = undefined;
 
     @memset(&bin_sizes, 0);
-    for (particles) |p| {
+    for (particles.items) |p| {
         const grid_index = pos_in_bin(p.pos);
         // std.log.debug("p: {}, grid: {}", .{p.pos, grid_index});
         bin_sizes[grid_index] += 1;
@@ -167,10 +165,10 @@ fn compute_bin() void {
 
     @memcpy(&grid_bins_range, &bin_sizes_prefix);
 
-    for (particles, 0..) |p, i| {
+    for (particles.items, 0..) |p, i| {
         const grid_index = pos_in_bin(p.pos);
         const bin_offset = &bin_sizes_prefix[grid_index];
-        grid_bins[bin_offset.*] = @intCast(i);
+        grid_bins.items[bin_offset.*] = @intCast(i);
         bin_offset.* += 1;
     }
 }
@@ -218,10 +216,9 @@ fn randomize_config(a: std.mem.Allocator) void {
 }
 
 fn generate_particle() void {
-    // const init_vel_mul = 0.1;
     const random = global_random;
     const init_vel_mul = 0;
-    for (&particles, 0..) |*p, i| {
+    for (particles.items, 0..) |*p, i| {
         p.pos = .{ (random.float(f32)-0.5)*2*w_RATIO, (random.float(f32)-0.5)*2 };
         p.spd = .{ (random.float(f32)-0.5)*init_vel_mul, (random.float(f32)-0.5)*init_vel_mul };
         // p.mass = (random.float(f32) + 0.5) * 2;
@@ -248,7 +245,6 @@ fn compute_interaction(a: *Particle, b: *Particle, dt: f32) void {
     //const interact_cfg_ba = particle_force_configs.items[b.kind * particle_kind + a.kind];
     const interact_force_ab = linear_force(interact_cfg_ab, d);
     //const interact_force_ba = linear_force(interact_cfg_ba, d);
-    // c.DrawLineEx(coord2rlcoord(w2s(a.pos)), coord2rlcoord(w2s(b.pos)), 1, c.ORANGE);
 
     a.spd += splatv2(dt*interact_force_ab) * unit_l;
     // b.spd -= splatv2(dt*interact_force_ba) * unit_l;
@@ -265,11 +261,11 @@ fn compute_interaction(a: *Particle, b: *Particle, dt: f32) void {
 }
 
 fn compute_interaction_in_range(particle: u32, bin_start: u32, bin_end: u32, dt: f32) void {
-    const a = &particles[particle];
+    const a = &particles.items[particle];
     for (bin_start..bin_end) |j| {
-        const other = grid_bins[j]; 
+        const other = grid_bins.items[j]; 
         if (other == particle) continue;
-        const b = &particles[other];
+        const b = &particles.items[other];
         compute_interaction(a, b, dt); 
     }
 }
@@ -287,7 +283,7 @@ fn compute_interaction_in_bin(grid_index: u32, dt: f32) void {
     const bin_start = grid_bins_range[grid_index];
     const bin_end = grid_bins_range[grid_index+1];
     for (bin_start..bin_end) |i| {
-        const particle: u32 = grid_bins[i];
+        const particle: u32 = grid_bins.items[i];
         compute_interaction_with_bin(particle, @intCast(grid_index), dt);
         if (grid_x > 0) compute_interaction_with_bin(particle,
             get_grid_index(grid_x-1, grid_y), dt);
@@ -346,7 +342,7 @@ var compute_worker_threads: [16]std.Thread = undefined;
 
 fn compute_interaction_in_bin_parallel(grid_index_a: *std.atomic.Value(u32), dt: f32) void {
     while (true) {
-        const grid_index = grid_index_a.fetchAdd(1, .monotonic);
+        const grid_index = grid_index_a.fetchAdd(1, .acq_rel);
         if (grid_index >= p_GRID_CELL) break;
         compute_interaction_in_bin(grid_index, dt);
     }
@@ -372,15 +368,18 @@ fn update_game(dt: f32,
     grid_compute_start_barrier: *Barrier,
     grid_compute_end_barrier: *Barrier,) void {
     if (collision_method_basic) {
-        for (0..particles.len) |i| {
-            const a = &particles[i];
-            for (i+1..particles.len) |j| {
-                const b = &particles[j];
+        for (0..particles.items.len) |i| {
+            const a = &particles.items[i];
+            for (i+1..particles.items.len) |j| {
+                const b = &particles.items[j];
                 compute_interaction(a, b, dt); 
             }
         }
     } else {
+        Perf.measure_start("compute_bin");
         compute_bin();
+        Perf.measure_end("compute_bin");
+
         grid_index.store(0, .release);
         grid_compute_start_barrier.wait();
         compute_interaction_in_bin_parallel(grid_index, dt);
@@ -390,9 +389,8 @@ fn update_game(dt: f32,
         grid_compute_end_barrier.* = .init(grid_compute_threads.len + 1);
     }
 
-    for (0..particles.len) |i| {
-        const a = &particles[i];
-        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
+    for (0..particles.items.len) |i| {
+        const a = &particles.items[i];
         // mouse force
         const d = dist(a.pos, mouse_pos);
         const l = a.pos - mouse_pos;
@@ -409,6 +407,7 @@ fn update_game(dt: f32,
         }
 
         a.pos += a.spd * splatv2(dt);
+        a.spd *= splatv2(@exp(-particle_drag*dt*dist(a.spd, .{0,0})));
         if (a.pos[1] < -1) {
             a.pos[1] = -1;
             a.spd[1] = -a.spd[1];
@@ -429,76 +428,7 @@ fn update_game(dt: f32,
     }
 }
 
-pub fn FixedRingBuffer(comptime T: type, comptime size: u32) type {
-    return struct {
-        const Self = @This();
-        data: [size]T = undefined,
-        active: std.StaticBitSet(size) = std.StaticBitSet(size).initEmpty(),
-        head: u32 = 0,
-        tail: u32 = 0,
-        count: u32 = 0,
-        len: u32 = size,
-
-        pub fn init(len: u32) Self {
-            std.debug.assert(len <= size and len != 0);
-            return .{ .len = len };
-        }
-
-        pub fn init_with_value(len: u32, val: T) Self {
-            std.debug.assert(len <= size and len != 0);
-            var self = Self { .len = len };
-            @memset(&self.data, val);
-            return self;
-
-        }
-
-        pub fn push(self: *Self, el: T) void {
-            if (self.count == self.len) {
-                self.head = (self.head + 1) % self.len;
-            } else {
-                self.count += 1;
-            }
-            self.data[self.tail] = el;
-            self.active.set(self.tail);
-            self.tail = (self.tail + 1) % self.len;
-            
-        }
-
-        pub fn avg(self: Self) T {
-            var sum: T = 0;
-            for (0..size) |i| {
-                sum += self.data[i];
-            }
-            return @divTrunc(sum, @as(T, @intCast(size)));
-        }
-
-        pub fn remove(self: *Self, i: u32) void {
-            self.active.unset(i);
-        }
-
-        pub fn at(self: Self, i: u32) T {
-            return self.data[(self.head + i) % self.len];
-        }
-
-        pub fn last(self: *Self) *T {
-            return &self.data[self.tail];
-        }
-
-        pub fn is_full(self: Self) bool {
-            return self.len == self.count;
-        }
-
-        pub fn clear(self: *Self, el: T) void {
-            self.head = 0;
-            self.tail = 0;
-            self.count = 0;
-            self.active = std.StaticBitSet(size).initEmpty();
-            @memset(&self.data, el);
-        }
-    };
-}
-
-
+// Adapted from LoadRenderTexture in raylib
 fn LoadRenderTextureHDR(width: c_int, height: c_int) c.RenderTexture2D
 {
     var target: c.RenderTexture2D = .{};
@@ -541,9 +471,39 @@ fn exp_smooth(current: f32, target: f32, delta: f32) f32 {
     return current + (target - current) * (1 - @exp(-delta));
 }
 
+const Cfg = struct {
+    pub var particle_count: f32 = 0;
+    pub const particle_count_min = 2000;
+    pub const particle_count_max = 40000;
+
+    pub const collision_radius_max = 0.05;
+    pub const collision_radius_min = 0.01;
+
+    pub const collision_str_max = 5;
+    pub const collision_str_min = 0.5;
+
+    pub const interact_radius_max = 0.1;
+    pub const interact_radius_min = 0.01;
+
+};
+
+var text_arena: std.heap.ArenaAllocator = undefined;
+fn text_fmt(comptime fmt: []const u8, args: anytype) [:0]const u8 {
+    return
+        std.fmt.allocPrintSentinel(text_arena.allocator(), fmt, args, 0) catch unreachable;
+} 
+
 pub fn main() !void {
-    std.log.debug("opengl version: {s}", .{ c.RLGL_VERSION });
-    c.InitWindow(w_WIDTH, w_HEIGHT, "Pasim"); 
+    Perf.init(std.heap.c_allocator);
+
+    c.InitWindow(w_WIDTH, w_HEIGHT, "Pasim");
+
+    // Gui setup
+    c.GuiLoadStyle("style_amber.rgs");
+    c.GuiSetStyle(c.DEFAULT, c.TEXT_SIZE, 23);
+
+    var show_gui = true;
+
     particle_default_texture = c.Texture2D {
         .id = c.rlGetTextureIdDefault(),
         .height = 1,
@@ -552,35 +512,23 @@ pub fn main() !void {
         .format = c.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
     };
 
-    var rand = std.Random.Xoroshiro128.init(@bitCast(std.time.microTimestamp()));
-    global_random = rand.random();
-
-
-
+    
     const shader = c.LoadShaderFromMemory(null, r_FS_SRC);
     const shader_radius_uniform = c.GetShaderLocation(shader, "radius");
     c.SetShaderValue(shader, shader_radius_uniform, @ptrCast(&g_PARTICLE_TEXTURE_RADIUS), c.SHADER_UNIFORM_FLOAT);
     const HDRBuffer = LoadRenderTextureHDR(w_WIDTH, w_HEIGHT);
     const hdr_shader = c.LoadShaderFromMemory(null, r_HDR_FS_SRC);
-    // const hdr_tex_id = c.rlLoadTexture(null, w_WIDTH, w_HEIGHT, c.RL_PIXELFORMAT_UNCOMPRESSED_R16G16B16A16, 1);
-    // const hdr_tex = c.Texture2D {
-    //     .id = hdr_tex_id,
-    //     .width = w_WIDTH,
-    //     .height = w_HEIGHT,
-    //     .format = c.RL_PIXELFORMAT_UNCOMPRESSED_R16G16B16A16,
-    //     .mipmaps = 1,
-    // };
-    // const hdr_render_tex = c.RenderTexture2D {
-    //     .id = hdr_tex_id,
-    //     .depth = 1,
-    //     .texture = hdr_tex,
-    // };
-    // defer c.rlUnloadTexture(hdr_tex_id);
 
-
-    // const p = Particle { .pos = .{0, 0} };
+    //
+    // initialize particles
+    //
+    particles.resize(undefined, 30000) catch unreachable;
+    Cfg.particle_count = 30000;
+    var rand = std.Random.Xoroshiro128.init(@bitCast(std.time.microTimestamp()));
+    global_random = rand.random();
     randomize_config(std.heap.c_allocator);
     generate_particle();
+
     var camera = c.Camera2D {
         .zoom = 1, 
     };
@@ -591,9 +539,8 @@ pub fn main() !void {
     c.SetTargetFPS(60);
     const simulation_dt = 1.0/simulation_frame_rate;
     const a = std.heap.c_allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
+    text_arena = std.heap.ArenaAllocator.init(a);
     const blend_mode: c.BlendMode = c.BLEND_ADDITIVE;
-    var measurement = FixedRingBuffer(i64, 5).init_with_value(5, 0);
 
     var grid_threads: [10]std.Thread = undefined;
     var grid_index_a = std.atomic.Value(u32).init(0);
@@ -606,15 +553,18 @@ pub fn main() !void {
     
     while (!c.WindowShouldClose()) {
         const dt = c.GetFrameTime();
-        _ = arena.reset(.retain_capacity);
+        _ = text_arena.reset(.retain_capacity);
         if (c.IsKeyPressed(c.KEY_R)) {
+            particles.resize(undefined, @intFromFloat(Cfg.particle_count)) catch unreachable;
             randomize_config(std.heap.c_allocator);
             generate_particle();
         }
+        if (c.IsKeyPressed(c.KEY_G)) {
+            show_gui = !show_gui;
+        }
         if (c.IsKeyPressed(c.KEY_SPACE)) {
             const timestamp = std.time.microTimestamp();
-            const screenshot_name = 
-                std.fmt.allocPrintSentinel(arena.allocator(), "screen_shot_{}.png", .{ timestamp }, 0) catch unreachable;
+            const screenshot_name = text_fmt("screen_shot_{}.png", .{ timestamp });
             c.TakeScreenshot(screenshot_name);
         }
 
@@ -637,7 +587,7 @@ pub fn main() !void {
 
             // Zoom increment
             // Uses log scaling to provide consistent zoom speed
-            camera_target.zoom = std.math.clamp(@exp2(@log2(camera.zoom)+wheel*camera_zoom_spd), 0.125, 64.0);
+            camera_target.zoom = std.math.clamp(@exp2(@log2(camera.zoom)+wheel*camera_zoom_spd), 0.5, 64.0);
         }
         if (c.IsKeyDown(c.KEY_W)) {
             camera_target.target.y += camera_move_spd * dt;
@@ -663,12 +613,11 @@ pub fn main() !void {
 
         const mouse_action: ?MouseAction =  if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) .attract else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT)) .repel else null;
 
-        const update_start = std.time.milliTimestamp();
+        Perf.measure_start("update_game");
         update_game(simulation_dt/2.0, mouse_wpos, mouse_action, &grid_index_a, &grid_threads, &start_barrier, &end_barrier);
         update_game(simulation_dt/2.0, mouse_wpos, mouse_action, &grid_index_a, &grid_threads, &start_barrier, &end_barrier);
+        Perf.measure_end("update_game");
 
-        const update_end = std.time.milliTimestamp();
-        measurement.push(update_end - update_start);
 
         const mouse_spos_test = w2s(.{ mouse_wpos[0], -mouse_wpos[1] }) ;
         // std.log.err("zoom: {}, mouse: spos: {} wpos: {}", .{ camera.zoom, mouse_spos, mouse_wpos});
@@ -676,16 +625,18 @@ pub fn main() !void {
 
         c.BeginTextureMode(HDRBuffer);
         {
+            Perf.measure_start("hdr draw");
             c.ClearBackground(c.BLACK);
+            Perf.measure_end("hdr draw");
             c.BeginMode2D(camera);
-
-            c.DrawCircle(@intFromFloat(mouse_spos_test[0]), @intFromFloat(mouse_spos_test[1]), size2pixels(mouse_force.radius),
-                .{.r = 0xff, .g = 0xff, .b = 0xff, .a = 0x3f });
+            if (mouse_action) |_|
+                c.DrawCircle(@intFromFloat(mouse_spos_test[0]), @intFromFloat(mouse_spos_test[1]), size2pixels(mouse_force.radius),
+                    .{.r = 0xff, .g = 0xff, .b = 0xff, .a = 0x3f });
 
             c.BeginBlendMode(@intCast(blend_mode));
             c.BeginShaderMode(shader);
-            for (particles) |p| {
-                DrawParticle(p);
+            for (particles.items) |p| {
+                draw_particle(p);
             }
             c.EndShaderMode();
             c.EndBlendMode();
@@ -725,21 +676,148 @@ pub fn main() !void {
             c.DrawTexture(HDRBuffer.texture, 0, 0, c.WHITE);
             c.EndShaderMode();
 
-           const measurement_txt = 
-                std.fmt.allocPrintSentinel(
-                    arena.allocator(),
-                    "update time: {} ms",
-                    .{ measurement.avg() }, 0) catch unreachable;
-            const frame_time_txt = 
-                std.fmt.allocPrintSentinel(
-                    arena.allocator(),
-                    "frame time: {} ms",
-                    .{ dt * 1000 }, 0) catch unreachable;
+            const measurement_txt = 
+                    text_fmt(
+                    "update time: {} ms, compute_bin time: {} ms, HDR render time: {} ms, Batch render time: {} ms",
+                    .{ 
+                        Perf.measure_avg("update_game"),
+                        Perf.measure_avg("compute_bin"),
+                        Perf.measure_avg("hdr draw"),
+                        Perf.measure_avg_safe("draw batch") orelse 0,
+                    });
+            // const frame_time_txt = 
+            //     std.fmt.allocPrintSentinel(
+            //         arena.allocator(),
+            //         "frame time: {} ms",
+            //         .{ dt * 1000 }, 0) catch unreachable;
 
-            c.DrawText(measurement_txt, 50, 50, 20, c.WHITE);
-            c.DrawText(frame_time_txt, 50, 75, 20, c.WHITE);
-            c.DrawFPS(50, 100);
+            c.DrawText(measurement_txt, w_WIDTH-800, 50, 20, c.WHITE);
+            c.DrawFPS(w_WIDTH-200, 100);
+            if (show_gui) {
+                c.DrawRectangleRounded(.{
+                    .x = 10, .y = 10,
+                    .width = 700,
+                    .height = 500,
+                }, 0.05, 0, .{ .r = 0x00, .g = 0x00, .b = 0x00, .a = 0x7f });
+                c.DrawRectangleRoundedLines(.{
+                    .x = 10, .y = 10,
+                    .width = 700,
+                    .height = 500,
+                }, 0.05, 0, c.WHITE);
+
+
+                _ = c.GuiLabel(.{
+                    .x = 20,
+                    .y = 50,
+                    .width = 200,
+                    .height = 30,
+                }, "Particle Count:");
+
+                _ = c.GuiSlider(
+                    .{
+                        .x = 300,
+                        .y = 50,
+                        .width = 200,
+                        .height = 30,
+                    },
+                    text_fmt("{}", .{Cfg.particle_count_min}),
+                    text_fmt("{}", .{Cfg.particle_count_max}),
+                    &Cfg.particle_count,
+                    Cfg.particle_count_min, Cfg.particle_count_max);
+                _ = c.GuiLabel(.{
+                    .x = 550,
+                    .y = 50,
+                    .width = 100,
+                    .height = 30,
+                }, text_fmt("({})", .{ @as(u32, @intFromFloat(Cfg.particle_count)) }).ptr);
+
+
+                _ = c.GuiLabel(.{
+                    .x = 20,
+                    .y = 100,
+                    .width = 200,
+                    .height = 30,
+                }, "Collision Radius:");
+
+                _ = c.GuiSlider(
+                    .{
+                        .x = 300,
+                        .y = 100,
+                        .width = 200,
+                        .height = 30,
+                    },
+                    text_fmt("{}", .{Cfg.collision_radius_min}),
+                    text_fmt("{}", .{Cfg.collision_radius_max}),
+                    &collision_cfg.radius,
+                    Cfg.collision_radius_min, Cfg.collision_radius_max);
+                _ = c.GuiLabel(.{
+                    .x = 550,
+                    .y = 100,
+                    .width = 100,
+                    .height = 30,
+                }, text_fmt("({:.4})", .{ collision_cfg.radius }));
+
+                _ = c.GuiLabel(.{
+                    .x = 20,
+                    .y = 150,
+                    .width = 150,
+                    .height = 30,
+                }, "Collision Strength:");
+                _ = c.GuiSlider(
+                    .{
+                        .x = 300,
+                        .y = 150,
+                        .width = 200,
+                        .height = 30,
+                    },
+                    text_fmt("{}", .{Cfg.collision_str_min}),
+                    text_fmt("{}", .{Cfg.collision_str_max}),
+                    &collision_cfg.strength,
+                    Cfg.collision_str_min, Cfg.collision_str_max);
+                _ = c.GuiLabel(.{
+                    .x = 550,
+                    .y = 150,
+                    .width = 100,
+                    .height = 30,
+                }, text_fmt("({:.4})", .{ collision_cfg.strength }));
+
+                _ = c.GuiLabel(.{
+                    .x = 20,
+                    .y = 250,
+                    .width = 400,
+                    .height = 30,
+                }, "Randomization Configuration");
+
+                _ = c.GuiLabel(.{
+                    .x = 20,
+                    .y = 300,
+                    .width = 150,
+                    .height = 30,
+                }, "Collision Strength:");
+                _ = c.GuiSlider(
+                    .{
+                        .x = 300,
+                        .y = 300,
+                        .width = 200,
+                        .height = 30,
+                    },
+                    text_fmt("{}", .{Cfg.interact_radius_min}),
+                    text_fmt("{}", .{Cfg.interact_radius_max}),
+                    &r_force_radius_max,
+                    Cfg.interact_radius_min, Cfg.interact_radius_max);
+                _ = c.GuiLabel(.{
+                    .x = 550,
+                    .y = 300,
+                    .width = 100,
+                    .height = 30,
+                }, text_fmt("({:.4})", .{ r_force_radius_max }));
+
+            }
         }
+        Perf.measure_start("draw batch");
         c.EndDrawing();
+        Perf.measure_end("draw batch");
     }
+
+    c.CloseWindow();
 }

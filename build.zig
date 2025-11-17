@@ -11,8 +11,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .root_source_file = b.path("src/main.zig"),
     });
+
+    // raylib 
     pasim.addIncludePath(raylib.path("src"));
     pasim.linkLibrary(raylib.artifact("raylib"));
+
+    // raygui
+    pasim.addCSourceFile(.{
+        .file = b.path("src/thirdparty/raygui.h"),
+        .flags = &.{ "-DRAYGUI_IMPLEMENTATION" },
+        .language = .c,
+    });
+    pasim.addIncludePath(b.path("src/thirdparty"));
 
     const exe = b.addExecutable(.{
         .name = "pasim",
