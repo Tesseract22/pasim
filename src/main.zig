@@ -314,7 +314,7 @@ fn compute_interaction_in_bin(grid_index: u32, dt: f32) void {
 }
 
 const Barrier = struct {
-    event: std.Thread.ResetEvent = .{},
+    event: std.Thread.ResetEvent = .unset,
     counter: std.atomic.Value(usize),
 
     pub fn init(num_threads: usize) Barrier {
@@ -524,7 +524,8 @@ pub fn main() !void {
     //
     particles.resize(undefined, 30000) catch unreachable;
     Cfg.particle_count = 30000;
-    var rand = std.Random.Xoroshiro128.init(@bitCast(std.time.microTimestamp()));
+    const now = try std.time.Instant.now();
+    var rand = std.Random.Xoroshiro128.init(@bitCast(now.timestamp));
     global_random = rand.random();
     randomize_config(std.heap.c_allocator);
     generate_particle();
@@ -563,8 +564,8 @@ pub fn main() !void {
             show_gui = !show_gui;
         }
         if (c.IsKeyPressed(c.KEY_SPACE)) {
-            const timestamp = std.time.microTimestamp();
-            const screenshot_name = text_fmt("screen_shot_{}.png", .{ timestamp });
+            const timestamp = std.time.Instant.now() catch unreachable;
+            const screenshot_name = text_fmt("screen_shot_{}.png", .{ timestamp.timestamp });
             c.TakeScreenshot(screenshot_name);
         }
 

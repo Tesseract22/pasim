@@ -71,7 +71,7 @@ pub fn FixedRingBuffer(comptime T: type, comptime size: u32) type {
     };
 }
 
-const Measurement = FixedRingBuffer(struct {i64, i64}, 5);
+const Measurement = FixedRingBuffer(struct {u64, u64}, 5);
 var measurements: std.StringHashMap(Measurement) = undefined;
 
 pub fn init(a: std.mem.Allocator) void {
@@ -83,22 +83,22 @@ pub fn measure_start(name: []const u8) void {
     if (!gop.found_existing) {
         gop.value_ptr.* = .init_with_value(5, .{0,0});
     }
-    gop.value_ptr.push(.{std.time.milliTimestamp(), undefined});
+    gop.value_ptr.push(.{ (std.time.Instant.now() catch unreachable).timestamp, undefined});
 }
 
 pub fn measure_end(name: []const u8) void {
     const measurement = measurements.getPtr(name) orelse std.process.fatal("no measurement named {s}", .{ name });
-    measurement.last().*[1] = std.time.milliTimestamp();
+    measurement.last().*[1] = (std.time.Instant.now() catch unreachable).timestamp;
     // std.log.err("time: {}, avg: {}", .{measurement.last().*, measurement.avg() });
 }
 
-pub fn measure_avg(comptime name: []const u8) i64 {
+pub fn measure_avg(comptime name: []const u8) u64 {
     return measure_avg_safe(name) orelse std.process.fatal("no measurement named {s}", .{ name });
 }
 
-pub fn measure_avg_safe(comptime name: []const u8) ?i64 {
+pub fn measure_avg_safe(comptime name: []const u8) ?u64 {
     const measurement = measurements.getPtr(name) orelse return null;
-    var avg: i64 = 0;
+    var avg: u64 = 0;
     for (0..5) |i| {
         avg += measurement.data[i][1] - measurement.data[i][0];
     }
